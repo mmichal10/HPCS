@@ -65,6 +65,52 @@ void cpy(int n, float *src, float *dst) {
 	if (i < n)
 		dst[i] = src[i];
 }
+
+__global__
+void dot(int n, float *src, float *dst) {
+	int i = blockIdx.x*blockDim.x+threadIdx.x;
+	int tid = threadIdx.x;
+	extern __shared__ float c_shared[];
+
+	if (i < n) {
+		c_shared[i] = src[i] * dst[i];
+		__syncthreads();
+
+		for (unsigned int s=1; s < blockDim.x; s *= 2) {
+			if (tid % (2*s) == 0)
+				c_shared[tid] += c_shared[tid + s];
+
+			__syncthreads();
+		}
+
+		if (tid == 0)
+			dst[blockIdx.x] = c_shared[0];
+	}
+}
+
+__global__
+void csrmv(int m, int n, int nnz, float alpha, float *csrValA, int *csrRowPtrA,
+		int *csrColIdA, float *x, float beta, float *y)
+{
+	int i = blockIdx.x*blockDim.x+threadIdx.x;
+	int j;
+	float sub = 0;
+	if (i < n) {
+		for (j = csrRowPtrA[i]; j < csrRowPtrA[i+1]; j++)
+			sub += csrValA[j] * x[csrColIdA[j]];
+		y[i] = sub;
+	}
+}
+
+__global__
+void dot(int n, float *x, float *y, float *result)
+{
+	int i = blockIdx.x*blockDim.x+threadIdx.x;
+	if (i < n) {
+		y[i] = x[i] * y[i];
+	}
+}
+
 /* genTridiag: generate a random tridiagonal symmetric matrix */
 void genTridiag(int *I, int *J, float *val, int N, int nz)
 {
@@ -221,7 +267,8 @@ void cgs_basic(int argc, char **argv, int N, int M){
 
 
     double t_start = mclock();
-    cusparseScsrmv(cusparseHandle,CUSPARSE_OPERATION_NON_TRANSPOSE, N, N, nz, &alpha, descr, d_val, d_row, d_col, d_x, &beta, d_Ax);
+    //cusparseScsrmv(cusparseHandle,CUSPARSE_OPERATION_NON_TRANSPOSE, N, N, nz, &alpha, descr, d_val, d_row, d_col, d_x, &beta, d_Ax);
+	csrmv<<<(N+255)/256, 256>>>(N, N, nz, alpha, d_val, d_row, d_col, d_x, beta, d_Ax);
 
     //cublasSaxpy(cublasHandle, N, &alpham1, d_Ax, 1, d_r, 1);                                // PODMIEN FUNCKJE (I)
 	saxpy<<<(N+255)/256, 256>>>(N, alpham1, d_Ax, d_r);
@@ -244,7 +291,8 @@ void cgs_basic(int argc, char **argv, int N, int M){
             cublasStatus = cublasScopy(cublasHandle, N, d_r, 1, d_p, 1);                    // PODMIEN FUNCKJE (I)
         }
 
-        cusparseScsrmv(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, N, N, nz, &alpha, descr, d_val, d_row, d_col, d_p, &beta, d_Ax); // PODMIEN FUNCKJE (III)
+        //cusparseScsrmv(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, N, N, nz, &alpha, descr, d_val, d_row, d_col, d_p, &beta, d_Ax); // PODMIEN FUNCKJE (III)
+		csrmv<<<(N+255)/256, 256>>>(N, N, nz, alpha, d_val, d_row, d_col, d_p, beta, d_Ax);
         cublasStatus = cublasSdot(cublasHandle, N, d_p, 1, d_Ax, 1, &dot);                  // PODMIEN FUNCKJE (II)
         a = r1 / dot;
 
@@ -418,7 +466,8 @@ void cgs_TODO(int argc, char **argv, int N, int M){
 
 
     // sparse matrix vector product: d_Ax = A * d_x
-    cusparseScsrmv(cusparseHandle,CUSPARSE_OPERATION_NON_TRANSPOSE, N, N, nz, &alpha, descr, d_val, d_row, d_col, d_x, &beta, d_Ax);  // PODMIEN FUNCKJE (ZADANIE-I)
+    //cusparseScsrmv(cusparseHandle,CUSPARSE_OPERATION_NON_TRANSPOSE, N, N, nz, &alpha, descr, d_val, d_row, d_col, d_x, &beta, d_Ax);  // PODMIEN FUNCKJE (ZADANIE-I)
+	csrmv<<<(N+255)/256, 256>>>(N, N, nz, alpha, d_val, d_row, d_col, d_x, beta, d_Ax);
 
 
     //azpy: d_r = d_r + alpham1 * d_Ax
@@ -449,7 +498,9 @@ void cgs_TODO(int argc, char **argv, int N, int M){
         }
 
         //sparse matrix-vector product: d_Ax = A * d_p
-        cusparseScsrmv(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, N, N, nz, &alpha, descr, d_val, d_row, d_col, d_p, &beta, d_Ax); // PODMIEN FUNCKJE (ZADANIE-II)
+        //cusparseScsrmv(cusparseHandle, CUSPARSE_OPERATION_NON_TRANSPOSE, N, N, nz, &alpha, descr, d_val, d_row, d_col, d_p, &beta, d_Ax); // PODMIEN FUNCKJE (ZADANIE-II)
+	csrmv<<<(N+255)/256, 256>>>(N, N, nz, alpha, d_val, d_row, d_col, d_p, beta, d_Ax);
+
         cublasStatus = cublasSdot(cublasHandle, N, d_p, 1, d_Ax, 1, &dot);                  // PODMIEN FUNCKJE (ZADANIE-III)
         a = r1 / dot;
 
@@ -515,12 +566,6 @@ void cgs_TODO(int argc, char **argv, int N, int M){
 
 
 }
-
-
-
-
-
-
 
 int main(int argc, char **argv)
 {
